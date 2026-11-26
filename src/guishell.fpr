@@ -1,6 +1,8 @@
 # A small Main Profile shell over the existing System/Graphics and appkit ABI.
 # Cooperative app plugins run inside this shell; this is not process isolation.
+
 unsafe module.
+
 QS = use "mods/qsys".
 GX = use "mods/graphics".
 EP = use "mods/ep#d65056c9d7dc9c18".
@@ -25,6 +27,7 @@ Row = S2.Row. Col = S2.Col. Pad = S2.Pad. Gap = S2.Gap.
 W = S2.W. H = S2.H. Grow = S2.Grow. Fs = S2.Fs.
 Bg = S2.Bg. Fg = S2.Fg. Round = S2.Round. Center = S2.Center. Mid = S2.Mid.
 Tile = Type (Tile id title hint table).
+
 width = 960. height = 600.
 serviceBudgetMs = 5000.
 ink = (940, 950, 990). dim = (530, 610, 750).
@@ -121,7 +124,7 @@ resize env w h m = if not (L.valid w h) then m else
 key env k m = routeInput env (SI.decode k) m.
 routeInput env (SI.Focus active) m =
   {m | inputActive = active, down = False, capture = L.None, hover = L.None, wheel = 0,
-    appCommands = (if m.active > 0 and not m.appFailed then [AP.Deliver (AW.Focus active)] else Nil)}.
+       appCommands = (if m.active > 0 and not m.appFailed then [AP.Deliver (AW.Focus active)] else Nil)}.
 routeInput env SI.Cancel m = {m | down = False, capture = L.None, hover = L.None,
   appCommands = (if m.active > 0 and not m.appFailed then [AP.Deliver AW.Cancel] else Nil)}.
 routeInput env ev m | not m.inputActive = m.
@@ -131,11 +134,14 @@ routeInput env (SI.Up x y) m = pointerEvent env 2 x y m.
 routeInput env (SI.Key k) m =
   next = keyCode env k {m | down = False, capture = L.None};
   if m.active > 0 and m.down and not m.appFailed and next.active > 0 then
-    {next | appCommands = AP.Deliver AW.Cancel :: next.appCommands} else next.
+    {next | appCommands = AP.Deliver AW.Cancel :: next.appCommands}
+  else
+    next.
 keyCode env 1 m =
   _ = print "shell: home";
   paneUpdate PN.Leave {m | active = 0, appCommands = [AP.Home], status = "Welcome home",
-    inner = AW.Frame 0 0 (Box Nil Nil) Nil "", focus = L.Tile m.selected, hover = L.None, down = False, capture = L.None, wheel = 0}.
+                           inner = AW.Frame 0 0 (Box Nil Nil) Nil "", focus = L.Tile m.selected, hover = L.None, down = False, capture = L.None, wheel = 0}.
+
 # P snapshots from the home grid and the shortcuts; while an app is open a
 # typed p is the app's, and ctrl-P (the input tier's +4000 bias) snapshots
 keyCode env 25 m | m.active <= 0 = _ = print "shell: snapshot {m.snap + 1}"; {m | snap = m.snap + 1}.
@@ -160,6 +166,7 @@ keyCode env 104 m = page env m (0 - 1).
 keyCode env 102 m = select env m 0.
 keyCode env 107 m = (q, tiles, mt, jobs, sessions) = env; select env m (count tiles - 1).
 keyCode env k m = m.
+
 tab reverse m =
   target = if m.active == 0 then (case m.focus of
       L.Previous -> if reverse then L.Tile m.selected else L.Next
@@ -170,6 +177,7 @@ tab reverse m =
     | L.Home -> if reverse then L.Refresh else L.Content
     | other -> if reverse then L.Home else L.Refresh);
   {m | focus = target, capture = L.None, down = False, hover = L.None}.
+
 activate env (L.Tile index) m = openTile env (select env m index).
 activate env L.Previous m = next = page env m (0 - 1); {next | focus = L.Previous}.
 activate env L.Next m = next = page env m 1; {next | focus = L.Next}.
@@ -177,6 +185,7 @@ activate env L.Home m = keyCode env 1 m.
 activate env L.Refresh m = if scrollable m.active then paneUpdate PN.Refresh m else appKey env 19 m.
 activate env L.Content m = if m.active > 0 then appKey env 28 m else m.
 activate env target m = m.
+
 select env m n =
   (q, tiles, mt, jobs, sessions) = env;
   selected = clamp 0 (L.max 0 (count tiles - 1)) n;
@@ -364,6 +373,7 @@ inputStep graphics me state =
       (True, next).
 
 main = run "qos-shell".
+
 run tag =
   runWith tag update.
 # Validation entries can wrap updates while sharing the real boot/lifecycle.
