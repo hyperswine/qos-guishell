@@ -33,6 +33,7 @@ serviceBudgetMs = 5000.
 ink = (940, 950, 990). dim = (530, 610, 750).
 accent = (380, 800, 980).
 
+# ideally should use the std lib
 count Nil = 0.
 count (_ :: r) = 1 + count r.
 cat Nil ys = ys.
@@ -50,11 +51,13 @@ shortcuts = [Tile "clock" "Clock" "A moment of calm" (0 - 1),
              Tile "files" "Files" "Explore your onboard URLs" (0 - 2),
              Tile "logs" "Logs" "See what QOS is doing" (0 - 3),
              Tile "about" "About QOS" "Small language. Open system." (0 - 4)].
+
 installed me st apps = case st == 0 of
     True -> Nil
   | False -> case FS.readLatest me st "apps/index" of
       Err why -> _ = Sys.logAt (if FS.missing why then 1 else 2) "shell: app index unavailable ({why})"; Nil
     | Ok s -> diskTiles (AK.lines s) apps.
+
 diskTiles Nil apps = Nil.
 diskTiles (id :: rest) apps = diskTile id apps :: diskTiles rest apps.
 diskTile id Nil = Tile id id "Archive could not be attached" (0 - 100).
@@ -62,19 +65,22 @@ diskTile id (QS.App aid name ti :: rest) = case id == aid of
     True -> Tile id name "Onboard .qa application" ti
   | False -> diskTile id rest.
 
-
 init env = {page = 0, selected = 0, active = 0, inner = AW.Frame 0 0 (Box Nil Nil) Nil "", appFailed = False, appCommands = Nil, status = "Ready when you are", snap = 0, pane = PN.init, commands = Nil, layout = L.layout width height, focus = L.Tile 0, hover = L.None, inputActive = True, pointerX = 0, pointerY = 0, down = False, capture = L.None, wheel = 0, dragY = 0, dragScroll = 0, clock = "00:00", renderVersion = 0}.
+
 staticKey m = m.renderVersion + m.snap.
 staticView vp m = 0.
 done m = "shell ended".
+
 subscriptions port m = MV.SPort port :: subs m.
 subs m = [MV.STick 100, MV.SKeys].
+
 # Visible child state determines a monotonic render revision. Idle ticks and
 # motion within one hover target keep it. Input still runs at the usual pace;
 # all visible facts arrive through ordinary recursive MVU updates.
 update me env event m =
   (next, commands) = updateModel me env event m;
   (reviseView m next, commands).
+
 visualKey m = (m.page, m.selected, m.active, (if m.active > 0 then frameKey m.inner else (0, Box Nil Nil, Nil, "")),
   m.appFailed, m.status, m.pane.phase, m.pane.rows, m.pane.metrics, m.pane.scroll,
   m.layout, m.focus, m.hover, m.inputActive, m.clock).
@@ -82,14 +88,18 @@ visualKey m = (m.page, m.selected, m.active, (if m.active > 0 then frameKey m.in
 # and child status remain part of the visible key even when the tree is shared.
 frameKey (AW.Frame sid revision tree vals status) = (sid, tree, vals, status).
 frameKey other = (0, Box Nil Nil, Nil, "").
-reviseView previous next = if visualKey previous == visualKey next then next else
-  {next | renderVersion = previous.renderVersion + 1}.
+
+reviseView previous next =
+  if visualKey previous == visualKey next then
+    next
+  else
+    {next | renderVersion = previous.renderVersion + 1}.
+
 updateModel me env (MV.EKey 16) m | m.active == 0 and m.inputActive = (m, [MV.MQuit]).
 updateModel me env (MV.EKey k) m = effects me env (key env k m).
 updateModel me env (MV.EResize w h) m = effects me env (resize env w h m).
 updateModel me env (MV.EWheel dy dx) m = effects me env (wheel env dy dx m).
-updateModel me env MV.ETick m = effects me env (if m.active > 0 and not m.appFailed and m.inputActive then
-  {m | appCommands = [AP.Deliver AW.Tick]} else paneUpdate PN.Tick m).
+updateModel me env MV.ETick m = effects me env (if m.active > 0 and not m.appFailed and m.inputActive then {m | appCommands = [AP.Deliver AW.Tick]} else paneUpdate PN.Tick m).
 updateModel me env (MV.EMsg "quit" _) m = (m, [MV.MQuit]).
 updateModel me env (MV.EMsg tag body) m = case PJ.decode tag body of
     Err why -> (m, Nil)
@@ -100,10 +110,12 @@ updateModel me env (MV.EMsg tag body) m = case PJ.decode tag body of
         | False -> Unit;
       effects me env next.
 updateModel me env ev m = (m, Nil).
+
 # Child commands are values, interpreted outside the pure pane update/view.
 paneUpdate msg m =
   (pane, commands) = PN.update msg m.pane;
   {m | pane = pane, commands = cat m.commands commands}.
+
 effects me env m =
   (q, tiles, mt, jobs, sessions) = env;
   applied = appEffects me sessions m m.appCommands;
@@ -113,6 +125,7 @@ effects me env m =
   case PJ.run me jobs applied.commands of
       Ok u -> (cleared, Nil)
     | Err why -> (paneUpdate (PN.Complete m.pane.generation m.pane.source (Err why)) cleared, Nil).
+
 # Pure recursive input policy. A click commits on release over its captured
 # target; resize, focus loss and keyboard navigation revoke that capture.
 resize env w h m = if not (L.valid w h) then m else
@@ -121,7 +134,9 @@ resize env w h m = if not (L.valid w h) then m else
   next = paneUpdate (PN.Resize r.w r.h (L.px l 16) (L.px l 26)) m;
   {next | layout = l, page = m.selected / l.capacity, down = False, capture = L.None, hover = L.None, wheel = 0,
     appCommands = [AP.Resize w l.footer]}.
+
 key env k m = routeInput env (SI.decode k) m.
+
 routeInput env (SI.Focus active) m =
   {m | inputActive = active, down = False, capture = L.None, hover = L.None, wheel = 0,
        appCommands = (if m.active > 0 and not m.appFailed then [AP.Deliver (AW.Focus active)] else Nil)}.
@@ -137,6 +152,7 @@ routeInput env (SI.Key k) m =
     {next | appCommands = AP.Deliver AW.Cancel :: next.appCommands}
   else
     next.
+
 keyCode env 1 m =
   _ = print "shell: home";
   paneUpdate PN.Leave {m | active = 0, appCommands = [AP.Home], status = "Welcome home",
@@ -190,17 +206,21 @@ select env m n =
   (q, tiles, mt, jobs, sessions) = env;
   selected = clamp 0 (L.max 0 (count tiles - 1)) n;
   {m | selected = selected, page = selected / m.layout.capacity, focus = L.Tile selected, capture = L.None, down = False, hover = L.None}.
+
 page env m delta =
   (q, tiles, mt, jobs, sessions) = env;
   p = clamp 0 (pagesAt m tiles - 1) (m.page + delta);
   _ = print "shell: page {p + 1}";
   select env m (p * m.layout.capacity).
+
 # The compatibility entry decodes the adapter's fixed-stride virtual key.
 pointer env k m = routeInput env (SI.decode k) m.
+
 hit env m x y =
   (q, tiles, mt, jobs, sessions) = env;
   if m.active == 0 then L.hitHome m.layout m.page (count tiles) x y else
     if scrollable m.active then L.hitPane m.layout x y else L.hitApp m.layout x y.
+
 pointerEvent env kind x y m =
   target = hit env m x y;
   moved = {m | pointerX = x, pointerY = y, hover = target};
@@ -264,18 +284,17 @@ appEffects me sessions m Nil = m.
 appEffects me sessions m (command :: rest) =
   next = case AP.call me sessions command of
       Err why -> _ = Sys.logAt 2 "shell app: {why}";
-        {m | appFailed = True, status = "{why} - R RETRY / ESC HOME"}
+                {m | appFailed = True, status = "{why} - R RETRY / ESC HOME"}
     | Ok (AW.Frame sid revision tree vals status) -> {m | inner = AW.Frame sid revision tree vals status, appFailed = False}
     | Ok (AW.Closed sid result) -> m
     | Ok other -> {m | appFailed = True, status = "Invalid app session reply - R RETRY / ESC HOME"};
   appEffects me sessions next rest.
 
+# UI components for the main profile page. Ideally should be modular and reusable.
 text s c size = Lbl [Fs size, Fg c] s.
 spacer = Box [Grow] Nil.
 label l s c size width = Lbl [Fs (L.px l size), Fg c, S2.Ellip width] s.
-header l = Box [Row, W l.content, H l.header, Mid, Gap (L.px l 20)]
-  [Box [Col, Gap (L.px l 7)] [text "QOS" ink (L.px l 34), text "MAIN PROFILE" dim (L.px l 12)], spacer,
-   label l (if l.w < 800 then "" else "Your space, ready.") accent 16 (l.content / 2)].
+header l = Box [Row, W l.content, H l.header, Mid, Gap (L.px l 20)] [Box [Col, Gap (L.px l 7)] [text "QOS" ink (L.px l 34), text "MAIN PROFILE" dim (L.px l 12)], spacer, label l (if l.w < 800 then "" else "Your space, ready.") accent 16 (l.content / 2)].
 color n = case n % 4 of 0 -> (230, 580, 900) | 1 -> (290, 750, 590) | 2 -> (690, 470, 900) | other -> (920, 570, 350).
 tile ts m n | n >= count ts = Box [W m.layout.tileW, H m.layout.tileH] Nil.
 tile ts m n =
@@ -317,6 +336,8 @@ surface m body leftTarget leftTitle rightTarget rightTitle status =
         [header l, Box [H (L.px l 16)] Nil, body, spacer,
          footer m leftTarget leftTitle rightTarget rightTitle,
          Box [H (L.px l 16)] [label l status accent 12 l.content], Box [H (L.px l 10)] Nil]]].
+
+# Main profile page views and sheets
 home ts m = surface m (grid ts m) L.Previous "< PREVIOUS PAGE" L.Next "NEXT PAGE >"
   "PAGE {m.page + 1} / {pagesAt m ts}   {m.status}".
 sheet m title body =
@@ -374,12 +395,10 @@ inputStep graphics me state =
 
 main = run "qos-shell".
 
-run tag =
-  runWith tag update.
+run tag = runWith tag update.
 # Validation entries can wrap updates while sharing the real boot/lifecycle.
 runWith tag upd = runWindow tag upd 0 0.
-runWindow tag upd requestedW requestedH =
-  runProgram tag (MV.MApp init upd staticKey staticView view done subs) requestedW requestedH.
+runWindow tag upd requestedW requestedH = runProgram tag (MV.MApp init upd staticKey staticView view done subs) requestedW requestedH.
 # A diagnostic entry is an ordinary MVU program over its own model. The
 # shell still owns the same boot, ports, deadlines and shutdown sequence.
 runProgram tag app requestedW requestedH =
@@ -429,8 +448,10 @@ runSized me program q lifecycle tiles mt session dims =
   _ = kill inp;
   _ = kill port;
   finishSession me lifecycle ep (withCleanup (withCleanup result "app sessions close" appsStopped) "pane worker close" stopped).
+
 withPort port (MV.MApp ini upd sk vw vl dn sbs) = MV.MApp ini upd sk vw vl dn (portSubs port sbs).
 portSubs port sbs model = MV.SPort port :: sbs model.
+
 finishSession me lifecycle ep result =
   _ = Sys.shutdownBegin Unit;
   closed = EC.closeWithin serviceBudgetMs me ep;
