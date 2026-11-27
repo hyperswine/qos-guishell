@@ -21,6 +21,8 @@ SI = use "mods/shellinput".
 FS = use "std/fs#eb554fc5f32fe8fc".
 AC = use "std/actor#2de24bf2bdd5cb87".
 MV = use "std/mvu".
+EPW = use "mods/ep#d65056c9d7dc9c18".
+Plug = use "mods/plug".
 
 Box = S2.Box. Lbl = S2.Lbl.
 Row = S2.Row. Col = S2.Col. Pad = S2.Pad. Gap = S2.Gap.
@@ -47,11 +49,80 @@ clamp lo hi n = n.
 pages ts = L.pages (L.layout width height) (count ts).
 pagesAt m ts = L.pages m.layout (count ts).
 
+# The built-in Files pane (table -2) has no tile: Files is the app file
+# /apps/Files.qa. Its pane code stays for the Logs sheet.
 shortcuts = [Tile "clock" "Clock" "A moment of calm" (0 - 1),
-             Tile "files" "Files" "Explore your onboard URLs" (0 - 2),
              Tile "logs" "Logs" "See what QOS is doing" (0 - 3),
              Tile "about" "About QOS" "Small language. Open system." (0 - 4)].
 
+# ---- apps as files: /apps/<Name>.qa ------------------------------------------
+# An app is an ordinary file on the disk's URL file system. The home grid
+# lists /apps/ through the namespace; a tile's id is the file's url and its
+# title is the file name. The image is attached when the tile is first
+# opened (fileTable marks a tile not attached yet), like exec of a file.
+fileTable = 0 - 200.
+appUrl url = n = strlen url;
+  if n > 9 and EPW.startsWith "/apps/" url and substr url (n - 3) 3 == ".qa" and not (hasSlash url 6 (n - 3)) then substr url 6 (n - 9) else "".
+hasSlash s i n | i >= n = False.
+hasSlash s i n | charAt s i == 47 = True.
+hasSlash s i n = hasSlash s (i + 1) n.
+
+# One url's bytes through the namespace (open, read, close) under one deadline.
+readUrl me ns url = case AC.deadlineAfter serviceBudgetMs of
+    Err why -> Err why
+  | Ok until -> case EC.openUntil until me ns url "read" of
+      Err why -> Err why
+    | Ok ep ->
+        (r, ep2) = EC.readUntil until me ep 0;
+        _ = EC.closeUntil until me ep2;
+        case r of
+          Ok (EPW.IStr bytes) -> Ok bytes
+        | Ok other -> Err "{url} is not bytes"
+        | Err why -> Err why.
+
+fileApps me ns = case ns == 0 of
+    True -> Nil
+  | False -> case readUrl me ns "/apps/" of
+      Err why -> _ = Sys.logAt 1 "shell: /apps unavailable ({why})"; Nil
+    | Ok listing -> fileTiles (AK.lines listing).
+fileTiles Nil = Nil.
+fileTiles (url :: rest) =
+  name = appUrl url;
+  if name == "" then fileTiles rest else Tile url name url fileTable :: fileTiles rest.
+
+# The table an app file was attached to on this boot, so a reopen does not
+# attach a second copy. A replaced file is picked up at the next boot.
+attachedAt url Nil = Err "not attached".
+attachedAt url ((u, aid, ti) :: rest) = if u == url then Ok (aid, ti) else attachedAt url rest.
+
+# Read the file and attach its QAR2 image; the manifest names the app.
+attachFile me ns url = case readUrl me ns url of
+    Err why -> Err why
+  | Ok bytes ->
+      (aid, anm) = QS.qaManifest bytes;
+      ti = Mod.plugs 0;
+      if aid == "" then Err "{url} has no readable manifest" else
+        case Plug.attach bytes of
+          Err why -> Err why
+        | Ok u -> _ = Sys.logAt 0 "shell: {url} ({aid}) -> table #{ti}"; Ok (aid, ti).
+
+# A pending launch (m.launch, a url) becomes an ordinary OpenNamed command.
+launchFile me env m = if m.launch == "" then m else
+  (q, tiles, mt, jobs, sessions) = env;
+  QS.Qsys ns st vfs log apps = q;
+  url = m.launch;
+  found = case attachedAt url m.attached of
+      Ok hit -> Ok (hit, m.attached)
+    | Err none -> (case attachFile me ns url of
+        Err why -> Err why
+      | Ok (aid, ti) -> Ok ((aid, ti), (url, aid, ti) :: m.attached));
+  case found of
+    Err why -> _ = Sys.logAt 2 "shell: cannot open {url}: {why}";
+      {m | launch = "", appFailed = True, status = "Cannot open {url}: {why} - R RETRY / ESC HOME"}
+  | Ok ((aid, ti), attached) -> {m | launch = "", attached = attached, active = ti + 1, appFailed = False,
+      appCommands = AP.OpenNamed aid ti :: m.appCommands}.
+
+# Legacy disks (before 2026-11-27) list their apps in the apps/index record.
 installed me st apps = case st == 0 of
     True -> Nil
   | False -> case FS.readLatest me st "apps/index" of
@@ -65,7 +136,7 @@ diskTile id (QS.App aid name ti :: rest) = case id == aid of
     True -> Tile id name "Onboard .qa application" ti
   | False -> diskTile id rest.
 
-init env = {page = 0, selected = 0, active = 0, inner = AW.Frame 0 0 (Box Nil Nil) Nil "", appFailed = False, appCommands = Nil, status = "Ready when you are", snap = 0, pane = PN.init, commands = Nil, layout = L.layout width height, focus = L.Tile 0, hover = L.None, inputActive = True, pointerX = 0, pointerY = 0, down = False, capture = L.None, wheel = 0, dragY = 0, dragScroll = 0, clock = "00:00", renderVersion = 0}.
+init env = {launch = "", attached = Nil, page = 0, selected = 0, active = 0, inner = AW.Frame 0 0 (Box Nil Nil) Nil "", appFailed = False, appCommands = Nil, status = "Ready when you are", snap = 0, pane = PN.init, commands = Nil, layout = L.layout width height, focus = L.Tile 0, hover = L.None, inputActive = True, pointerX = 0, pointerY = 0, down = False, capture = L.None, wheel = 0, dragY = 0, dragScroll = 0, clock = "00:00", renderVersion = 0}.
 
 staticKey m = m.renderVersion + m.snap.
 staticView vp m = 0.
@@ -118,7 +189,8 @@ paneUpdate msg m =
 
 effects me env m =
   (q, tiles, mt, jobs, sessions) = env;
-  applied = appEffects me sessions m m.appCommands;
+  launched = launchFile me env m;
+  applied = appEffects me sessions launched launched.appCommands;
   seconds = if m.active == 0 - 1 then Sys.uptimeMs Unit / 1000 else 0;
   clock = if m.active == 0 - 1 then "{AK.pad2 (seconds / 60 % 60)}:{AK.pad2 (seconds % 60)}" else applied.clock;
   cleared = {applied | commands = Nil, appCommands = Nil, clock = clock};
@@ -254,7 +326,10 @@ openTile env m =
   _ = print "shell: open {id}";
   case ti == 0 - 100 of
     True -> {m | status = "Cannot open {id}: archive load was refused"}
-  | False -> case ti < 0 of
+  | False -> if ti == fileTable then
+      {m | active = 1, launch = id, appFailed = False, inner = AW.Frame 0 0 (Box Nil Nil) Nil "Loading",
+        status = title, focus = L.Content, down = False, capture = L.None, wheel = 0}
+    else case ti < 0 of
       True ->
         next = {m | active = ti, status = title, focus = L.Content, down = False, capture = L.None, wheel = 0};
         (case scrollable ti of
@@ -277,7 +352,8 @@ appKey env k m | m.active < 0 = m.
 appKey env 19 m | m.appFailed =
   (q, tiles, mt, jobs, sessions) = env;
   Tile id title hint table = at tiles m.selected;
-  {m | appCommands = [AP.OpenNamed id (m.active - 1)], appFailed = False}.
+  if table == fileTable then {m | launch = id, appFailed = False}
+  else {m | appCommands = [AP.OpenNamed id (m.active - 1)], appFailed = False}.
 appKey env k m | m.appFailed = m.
 appKey env k m = {m | appCommands = [AP.Deliver (AW.Key k)]}.
 appEffects me sessions m Nil = m.
@@ -308,7 +384,7 @@ tile ts m n =
       [Box [W (L.px l 56), H (L.px l 56), Round (L.px l 16), Bg (color n), Center, Mid]
         [text (substr title 0 1) ink (L.px l 28)], label l title ink 21 (L.max 1 (l.tileW - L.px l 100))],
      label l hint dim 13 (l.tileW - L.px l 30),
-     text (if ti == 0 - 100 then ".QA REFUSED" else if ti < 0 then "SHORTCUT" else ".QA APP") accent (L.px l 11)].
+     text (if ti == 0 - 100 then ".QA REFUSED" else if ti == fileTable then "APP FILE" else if ti < 0 then "SHORTCUT" else ".QA APP") accent (L.px l 11)].
 grid ts m =
   l = m.layout;
   Box [Col, W l.content, H (l.rows * l.tileH + (l.rows - 1) * l.rowGap), Gap l.rowGap]
@@ -405,7 +481,7 @@ runProgram tag app requestedW requestedH =
   me = myself 0;
   (q, lifecycle) = QS.bootManagedSized me requestedW requestedH;
   QS.Qsys ns st vfs log apps = q;
-  tiles = cat shortcuts (installed me st apps);
+  tiles = cat shortcuts (cat (fileApps me ns) (installed me st apps));
   mt = reg32 (device "clint") 49144;
   attached = GX.attach me ns tag;
   case attached of
