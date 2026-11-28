@@ -1,7 +1,9 @@
 # A small Main Profile shell over the existing System/Graphics and appkit ABI.
 # Cooperative app plugins run inside this shell; this is not process isolation.
 
-unsafe module.
+# Functions marked `unsafe` below call into the SDK's unsafe modules (qsys,
+# files, pane jobs, app sessions) or reach keyCode/activate, which call each
+# other; the rest of the module is checked safe.
 
 QS = use "mods/qsys".
 GX = use "mods/graphics".
@@ -47,18 +49,23 @@ shortcuts = [Tile "clock" "Clock" "A moment of calm" (0 - 1),
              Tile "logs" "Logs" "See what QOS is doing" (0 - 3),
              Tile "about" "About QOS" "Small language. Open system." (0 - 4)].
 
+installed : unsafe _ -> _ -> _ -> _ .
 installed me st apps =
   if st == 0 then Nil
   else case FS.readLatest me st "apps/index" of
       Err why -> _ = Sys.logAt (if FS.missing why then 1 else 2) "shell: app index unavailable ({why})"; Nil
     | Ok s -> diskTiles (AK.lines s) apps.
 
-diskTiles Nil apps = Nil.
-diskTiles (id :: rest) apps = diskTile id apps :: diskTiles rest apps.
-diskTile id Nil = Tile id id "Archive could not be attached" (0 - 100).
-diskTile id (QS.App aid name ti :: rest) =
-  if id == aid then Tile id name "Onboard .qa application" ti
-  else diskTile id rest.
+diskTiles : (ids : List String | measure ids) -> _ -> _ .
+diskTiles ids apps = case ids of
+    Nil -> Nil
+  | id :: rest -> diskTile id apps :: diskTiles rest apps.
+diskTile : String -> (apps : List _ | measure apps) -> _ .
+diskTile id apps = case apps of
+    Nil -> Tile id id "Archive could not be attached" (0 - 100)
+  | QS.App aid name ti :: rest ->
+      if id == aid then Tile id name "Onboard .qa application" ti
+      else diskTile id rest.
 
 init env = {page = 0, selected = 0, active = 0, inner = AW.Frame 0 0 (Box Nil Nil) Nil "", appFailed = False, appCommands = Nil, logs = Nil, status = "Ready when you are", snap = 0, pane = PN.init, commands = Nil, layout = L.layout width height, focus = L.Tile 0, hover = L.None, inputActive = True, pointerX = 0, pointerY = 0, down = False, capture = L.None, wheel = 0, dragY = 0, dragScroll = 0, clock = "00:00", renderVersion = 0}.
 
@@ -73,6 +80,7 @@ subs m = [MV.STick 100, MV.SKeys].
 # motion within one hover target keep it. Pure transitions live in pureUpdate;
 # all side effects (logging, clock reads, app IPC, pane jobs) execute in
 # performEffects at the MVU boundary.
+update : unsafe _ -> _ -> _ -> _ -> _ .
 update me env event m =
   (next, mvCmds) = pureUpdate env event m;
   (doneModel, outCmds) = if mvCmds != Nil then (next, mvCmds) else performEffects me env next;
@@ -95,6 +103,7 @@ reviseView previous next =
 emitLog line m = {m | logs = cat m.logs [line]}.
 
 # Pure MVU transition: zero IO, zero IPC, zero clock reads.
+pureUpdate : unsafe _ -> _ -> _ -> _ .
 pureUpdate env (MV.EKey 16) m | m.active == 0 and m.inputActive = (m, [MV.MQuit]).
 pureUpdate env (MV.EKey k) m = (key env k m, Nil).
 pureUpdate env (MV.EResize w h) m = (resize env w h m, Nil).
@@ -117,6 +126,7 @@ paneUpdate msg m =
   (pane, commands) = PN.update msg m.pane;
   {m | pane = pane, commands = cat m.commands commands}.
 
+performEffects : unsafe _ -> _ -> _ -> _ .
 performEffects me env m =
   (q, tiles, mt, jobs, sessions) = env;
   _ = List.each (fn line -> print line) m.logs;
@@ -137,8 +147,10 @@ resize env w h m = if not (L.valid w h) then m else
   {next | layout = l, page = m.selected / l.capacity, down = False, capture = L.None, hover = L.None, wheel = 0,
     appCommands = [AP.Resize w l.footer]}.
 
+key : unsafe _ -> _ -> _ -> _ .
 key env k m = routeInput env (SI.decode k) m.
 
+routeInput : unsafe _ -> _ -> _ -> _ .
 routeInput env (SI.Focus active) m =
   {m | inputActive = active, down = False, capture = L.None, hover = L.None, wheel = 0,
        appCommands = (if m.active > 0 and not m.appFailed then [AP.Deliver (AW.Focus active)] else Nil)}.
@@ -155,6 +167,7 @@ routeInput env (SI.Key k) m =
   else
     next.
 
+keyCode : unsafe _ -> _ -> _ -> _ .
 keyCode env 1 m =
   paneUpdate PN.Leave (emitLog "shell: home" {m | active = 0, appCommands = [AP.Home], status = "Welcome home",
                            inner = AW.Frame 0 0 (Box Nil Nil) Nil "", focus = L.Tile m.selected, hover = L.None, down = False, capture = L.None, wheel = 0}).
@@ -195,6 +208,7 @@ tab reverse m =
     | other -> if reverse then L.Home else L.Refresh);
   {m | focus = target, capture = L.None, down = False, hover = L.None}.
 
+activate : unsafe _ -> _ -> _ -> _ .
 activate env (L.Tile index) m = openTile env (select env m index).
 activate env L.Previous m = next = page env m (0 - 1); {next | focus = L.Previous}.
 activate env L.Next m = next = page env m 1; {next | focus = L.Next}.
@@ -214,6 +228,7 @@ page env m delta =
   emitLog "shell: page {p + 1}" (select env m (p * m.layout.capacity)).
 
 # The compatibility entry decodes the adapter's fixed-stride virtual key.
+pointer : unsafe _ -> _ -> _ -> _ .
 pointer env k m = routeInput env (SI.decode k) m.
 
 hit env m x y =
@@ -221,6 +236,7 @@ hit env m x y =
   if m.active == 0 then L.hitHome m.layout m.page (count tiles) x y else
     if scrollable m.active then L.hitPane m.layout x y else L.hitApp m.layout x y.
 
+pointerEvent : unsafe _ -> _ -> _ -> _ -> _ -> _ .
 pointerEvent env kind x y m =
   target = hit env m x y;
   moved = {m | pointerX = x, pointerY = y, hover = target};
@@ -277,6 +293,7 @@ appKey env 19 m | m.appFailed =
   {m | appCommands = [AP.OpenNamed id (m.active - 1)], appFailed = False}.
 appKey env k m | m.appFailed = m.
 appKey env k m = {m | appCommands = [AP.Deliver (AW.Key k)]}.
+appEffects : unsafe _ -> _ -> _ -> _ -> _ .
 appEffects me sessions m Nil = m.
 appEffects me sessions m (command :: rest) =
   next = case AP.call me sessions command of
@@ -309,11 +326,13 @@ tile ts m n =
 grid ts m =
   l = m.layout;
   Box [Col, W l.content, H (l.rows * l.tileH + (l.rows - 1) * l.rowGap), Gap l.rowGap]
-    (gridRows ts m 0).
-gridRows ts m row = if row >= m.layout.rows then Nil else
-  Box [Row, Gap m.layout.gap] (gridCols ts m row 0) :: gridRows ts m (row + 1).
-gridCols ts m row col = if col >= m.layout.cols then Nil else
-  tile ts m (m.page * m.layout.capacity + row * m.layout.cols + col) :: gridCols ts m row (col + 1).
+    (gridRows ts m l.rows 0).
+gridRows : _ -> _ -> (rows : Int) -> (row : Int | measure (rows - row)) -> _ .
+gridRows ts m rows row = if row >= rows then Nil else
+  Box [Row, Gap m.layout.gap] (gridCols ts m row m.layout.cols 0) :: gridRows ts m rows (row + 1).
+gridCols : _ -> _ -> Int -> (cols : Int) -> (col : Int | measure (cols - col)) -> _ .
+gridCols ts m row cols col = if col >= cols then Nil else
+  tile ts m (m.page * m.layout.capacity + row * m.layout.cols + col) :: gridCols ts m row cols (col + 1).
 button m target title width =
   l = m.layout;
   Box [Col, W width, H (L.px l 44), Pad (L.px l 10), Round (L.px l 8),
@@ -390,14 +409,19 @@ inputStep graphics me state =
       _ = send from event;
       (True, next).
 
+main : unsafe _ .
 main = run "qos-shell".
 
+run : unsafe _ -> _ .
 run tag = runWith tag update.
 # Validation entries can wrap updates while sharing the real boot/lifecycle.
+runWith : unsafe _ -> _ -> _ .
 runWith tag upd = runWindow tag upd 0 0.
+runWindow : unsafe _ -> _ -> _ -> _ -> _ .
 runWindow tag upd requestedW requestedH = runProgram tag (MV.MApp init upd staticKey staticView view done subs) requestedW requestedH.
 # A diagnostic entry is an ordinary MVU program over its own model. The
 # shell still owns the same boot, ports, deadlines and shutdown sequence.
+runProgram : unsafe _ -> _ -> _ -> _ -> _ .
 runProgram tag app requestedW requestedH =
   me = myself 0;
   (q, lifecycle) = QS.bootManagedSized me requestedW requestedH;
@@ -408,6 +432,7 @@ runProgram tag app requestedW requestedH =
   case attached of
       Err why -> finishUnattached me lifecycle (Err "shell graphics: {why}")
     | Ok ep -> runAttached me app q lifecycle tiles mt ep.
+runAttached : unsafe _ -> _ -> _ -> _ -> _ -> _ -> _ -> _ .
 runAttached me app q lifecycle tiles mt attached =
   (graphics, ep) = EC.owner attached;
   calls = spawn (AC.session me);
@@ -418,6 +443,7 @@ runAttached me app q lifecycle tiles mt attached =
   case dimsResult of
       Err why -> finishSession me lifecycle ep (Err "shell dimensions: {why}")
     | Ok dims -> runSized me app q lifecycle tiles mt ep dims.
+runSized : unsafe _ -> _ -> _ -> _ -> _ -> _ -> _ -> _ -> _ .
 runSized me program q lifecycle tiles mt session dims =
   QS.Qsys ns st vfs log apps = q;
   (graphics, ep) = EC.owner session;
