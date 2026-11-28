@@ -47,20 +47,20 @@ shortcuts = [Tile "clock" "Clock" "A moment of calm" (0 - 1),
              Tile "logs" "Logs" "See what QOS is doing" (0 - 3),
              Tile "about" "About QOS" "Small language. Open system." (0 - 4)].
 
-installed me st apps = case st == 0 of
-    True -> Nil
-  | False -> case FS.readLatest me st "apps/index" of
+installed me st apps =
+  if st == 0 then Nil
+  else case FS.readLatest me st "apps/index" of
       Err why -> _ = Sys.logAt (if FS.missing why then 1 else 2) "shell: app index unavailable ({why})"; Nil
     | Ok s -> diskTiles (AK.lines s) apps.
 
 diskTiles Nil apps = Nil.
 diskTiles (id :: rest) apps = diskTile id apps :: diskTiles rest apps.
 diskTile id Nil = Tile id id "Archive could not be attached" (0 - 100).
-diskTile id (QS.App aid name ti :: rest) = case id == aid of
-    True -> Tile id name "Onboard .qa application" ti
-  | False -> diskTile id rest.
+diskTile id (QS.App aid name ti :: rest) =
+  if id == aid then Tile id name "Onboard .qa application" ti
+  else diskTile id rest.
 
-init env = {page = 0, selected = 0, active = 0, inner = AW.Frame 0 0 (Box Nil Nil) Nil "", appFailed = False, appCommands = Nil, status = "Ready when you are", snap = 0, pane = PN.init, commands = Nil, layout = L.layout width height, focus = L.Tile 0, hover = L.None, inputActive = True, pointerX = 0, pointerY = 0, down = False, capture = L.None, wheel = 0, dragY = 0, dragScroll = 0, clock = "00:00", renderVersion = 0}.
+init env = {page = 0, selected = 0, active = 0, inner = AW.Frame 0 0 (Box Nil Nil) Nil "", appFailed = False, appCommands = Nil, logs = Nil, status = "Ready when you are", snap = 0, pane = PN.init, commands = Nil, layout = L.layout width height, focus = L.Tile 0, hover = L.None, inputActive = True, pointerX = 0, pointerY = 0, down = False, capture = L.None, wheel = 0, dragY = 0, dragScroll = 0, clock = "00:00", renderVersion = 0}.
 
 staticKey m = m.renderVersion + m.snap.
 staticView vp m = 0.
@@ -70,11 +70,13 @@ subscriptions port m = MV.SPort port :: subs m.
 subs m = [MV.STick 100, MV.SKeys].
 
 # Visible child state determines a monotonic render revision. Idle ticks and
-# motion within one hover target keep it. Input still runs at the usual pace;
-# all visible facts arrive through ordinary recursive MVU updates.
+# motion within one hover target keep it. Pure transitions live in pureUpdate;
+# all side effects (logging, clock reads, app IPC, pane jobs) execute in
+# performEffects at the MVU boundary.
 update me env event m =
-  (next, commands) = updateModel me env event m;
-  (reviseView m next, commands).
+  (next, mvCmds) = pureUpdate env event m;
+  (doneModel, outCmds) = if mvCmds != Nil then (next, mvCmds) else performEffects me env next;
+  (reviseView m doneModel, outCmds).
 
 visualKey m = (m.page, m.selected, m.active, (if m.active > 0 then frameKey m.inner else (0, Box Nil Nil, Nil, "")),
   m.appFailed, m.status, m.pane.phase, m.pane.rows, m.pane.metrics, m.pane.scroll,
@@ -90,33 +92,38 @@ reviseView previous next =
   else
     {next | renderVersion = previous.renderVersion + 1}.
 
-updateModel me env (MV.EKey 16) m | m.active == 0 and m.inputActive = (m, [MV.MQuit]).
-updateModel me env (MV.EKey k) m = effects me env (key env k m).
-updateModel me env (MV.EResize w h) m = effects me env (resize env w h m).
-updateModel me env (MV.EWheel dy dx) m = effects me env (wheel env dy dx m).
-updateModel me env MV.ETick m = effects me env (if m.active > 0 and not m.appFailed and m.inputActive then {m | appCommands = [AP.Deliver AW.Tick]} else paneUpdate PN.Tick m).
-updateModel me env (MV.EMsg "quit" _) m = (m, [MV.MQuit]).
-updateModel me env (MV.EMsg tag body) m = case PJ.decode tag body of
+emitLog line m = {m | logs = cat m.logs [line]}.
+
+# Pure MVU transition: zero IO, zero IPC, zero clock reads.
+pureUpdate env (MV.EKey 16) m | m.active == 0 and m.inputActive = (m, [MV.MQuit]).
+pureUpdate env (MV.EKey k) m = (key env k m, Nil).
+pureUpdate env (MV.EResize w h) m = (resize env w h m, Nil).
+pureUpdate env (MV.EWheel dy dx) m = (wheel env dy dx m, Nil).
+pureUpdate env MV.ETick m = (if m.active > 0 and not m.appFailed and m.inputActive then {m | appCommands = [AP.Deliver AW.Tick]} else paneUpdate PN.Tick m, Nil).
+pureUpdate env (MV.EMsg "quit" _) m = (m, [MV.MQuit]).
+pureUpdate env (MV.EMsg tag body) m = case PJ.decode tag body of
     Err why -> (m, Nil)
   | Ok msg ->
       next = paneUpdate msg m;
-      _ = case PN.loading m.pane and not (PN.loading next.pane) and next.pane.source != 0 and (m.pane.rows == Nil or (case next.pane.phase of PN.Failed why -> True | other -> False)) of
-          True -> print "shell: pane {next.pane.source} {PN.status next.pane}"
-        | False -> Unit;
-      effects me env next.
-updateModel me env ev m = (m, Nil).
+      failed = case next.pane.phase of PN.Failed why -> True | other -> False;
+      logged = if PN.loading m.pane and not (PN.loading next.pane) and next.pane.source != 0 and (m.pane.rows == Nil or failed)
+               then emitLog "shell: pane {next.pane.source} {PN.status next.pane}" next
+               else next;
+      (logged, Nil).
+pureUpdate env ev m = (m, Nil).
 
 # Child commands are values, interpreted outside the pure pane update/view.
 paneUpdate msg m =
   (pane, commands) = PN.update msg m.pane;
   {m | pane = pane, commands = cat m.commands commands}.
 
-effects me env m =
+performEffects me env m =
   (q, tiles, mt, jobs, sessions) = env;
+  _ = List.each (fn line -> print line) m.logs;
   applied = appEffects me sessions m m.appCommands;
   seconds = if m.active == 0 - 1 then Sys.uptimeMs Unit / 1000 else 0;
   clock = if m.active == 0 - 1 then "{AK.pad2 (seconds / 60 % 60)}:{AK.pad2 (seconds % 60)}" else applied.clock;
-  cleared = {applied | commands = Nil, appCommands = Nil, clock = clock};
+  cleared = {applied | commands = Nil, appCommands = Nil, logs = Nil, clock = clock};
   case PJ.run me jobs applied.commands of
       Ok u -> (cleared, Nil)
     | Err why -> (paneUpdate (PN.Complete m.pane.generation m.pane.source (Err why)) cleared, Nil).
@@ -149,14 +156,13 @@ routeInput env (SI.Key k) m =
     next.
 
 keyCode env 1 m =
-  _ = print "shell: home";
-  paneUpdate PN.Leave {m | active = 0, appCommands = [AP.Home], status = "Welcome home",
-                           inner = AW.Frame 0 0 (Box Nil Nil) Nil "", focus = L.Tile m.selected, hover = L.None, down = False, capture = L.None, wheel = 0}.
+  paneUpdate PN.Leave (emitLog "shell: home" {m | active = 0, appCommands = [AP.Home], status = "Welcome home",
+                           inner = AW.Frame 0 0 (Box Nil Nil) Nil "", focus = L.Tile m.selected, hover = L.None, down = False, capture = L.None, wheel = 0}).
 
 # P snapshots from the home grid and the shortcuts; while an app is open a
 # typed p is the app's, and ctrl-P (the input tier's +4000 bias) snapshots
-keyCode env 25 m | m.active <= 0 = _ = print "shell: snapshot {m.snap + 1}"; {m | snap = m.snap + 1}.
-keyCode env 4025 m = _ = print "shell: snapshot {m.snap + 1}"; {m | snap = m.snap + 1}.
+keyCode env 25 m | m.active <= 0 = emitLog "shell: snapshot {m.snap + 1}" {m | snap = m.snap + 1}.
+keyCode env 4025 m = emitLog "shell: snapshot {m.snap + 1}" {m | snap = m.snap + 1}.
 # Tab inside an open app's content is the app's (the Editor indents with
 # it); Shift-Tab always moves the focus, so the chrome stays reachable
 keyCode env 15 m | m.active > 0 and m.focus == L.Content and not m.appFailed = appKey env 15 m.
@@ -205,8 +211,7 @@ select env m n =
 page env m delta =
   (q, tiles, mt, jobs, sessions) = env;
   p = clamp 0 (pagesAt m tiles - 1) (m.page + delta);
-  _ = print "shell: page {p + 1}";
-  select env m (p * m.layout.capacity).
+  emitLog "shell: page {p + 1}" (select env m (p * m.layout.capacity)).
 
 # The compatibility entry decodes the adapter's fixed-stride virtual key.
 pointer env k m = routeInput env (SI.decode k) m.
@@ -246,16 +251,13 @@ wheel env dy dx m = if not m.inputActive or (m.focus != L.Content and m.focus !=
 openTile env m =
   (q, tiles, mt, jobs, sessions) = env;
   Tile id title hint ti = at tiles m.selected;
-  _ = print "shell: open {id}";
-  case ti == 0 - 100 of
-    True -> {m | status = "Cannot open {id}: archive load was refused"}
-  | False -> case ti < 0 of
-      True ->
-        next = {m | active = ti, status = title, focus = L.Content, down = False, capture = L.None, wheel = 0};
-        (case scrollable ti of
-          True -> paneUpdate (PN.Open (case ti == 0 - 2 of True -> 1 | False -> 2)) next
-        | False -> paneUpdate PN.Leave next)
-    | False -> {m | active = ti + 1, appFailed = False, appCommands = [AP.OpenNamed id ti],
+  m1 = emitLog "shell: open {id}" m;
+  if ti == 0 - 100 then {m1 | status = "Cannot open {id}: archive load was refused"}
+  else if ti < 0 then
+    next = {m1 | active = ti, status = title, focus = L.Content, down = False, capture = L.None, wheel = 0};
+    if scrollable ti then paneUpdate (PN.Open (if ti == 0 - 2 then 1 else 2)) next
+    else paneUpdate PN.Leave next
+  else {m1 | active = ti + 1, appFailed = False, appCommands = [AP.OpenNamed id ti],
         inner = AW.Frame 0 0 (Box Nil Nil) Nil "Loading", status = title, focus = L.Content, down = False, capture = L.None, wheel = 0}.
 
 scrollable a = a == 0 - 2 or a == 0 - 3.
