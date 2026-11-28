@@ -21,6 +21,8 @@ SI = use "mods/shellinput".
 FS = use "std/fs#eb554fc5f32fe8fc".
 AC = use "std/actor#2de24bf2bdd5cb87".
 MV = use "std/mvu".
+List = use "std/list".
+M = use "std/math".
 
 Box = S2.Box. Lbl = S2.Lbl.
 Row = S2.Row. Col = S2.Col. Pad = S2.Pad. Gap = S2.Gap.
@@ -33,17 +35,10 @@ serviceBudgetMs = 5000.
 ink = (940, 950, 990). dim = (530, 610, 750).
 accent = (380, 800, 980).
 
-# ideally should use the std lib
-count Nil = 0.
-count (_ :: r) = 1 + count r.
-cat Nil ys = ys.
-cat (x :: r) ys = x :: cat r ys.
-at (x :: r) 0 = x.
-at (x :: r) n = at r (n - 1).
-at Nil n = Tile "" "" "" (0 - 1).
-clamp lo hi n | n < lo = lo.
-clamp lo hi n | n > hi = hi.
-clamp lo hi n = n.
+count xs = List.length xs.
+cat xs ys = List.append xs ys.
+at xs n = List.getWithDefault (Tile "" "" "" (0 - 1)) n xs.
+clamp lo hi n = M.clamp lo hi n.
 pages ts = L.pages (L.layout width height) (count ts).
 pagesAt m ts = L.pages m.layout (count ts).
 
